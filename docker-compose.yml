@@ -1,0 +1,16 @@
+services:
+  web-scraper:
+    build: .
+    ports:
+      - "8020:8020"
+    environment:
+      - WEB_SCRAPER_PORT=8020
+      # Optional: enables gpt-4o-mini content cleanup pass.
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8020/health').raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
