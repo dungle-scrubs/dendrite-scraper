@@ -8,7 +8,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    """Web scraper service configuration.
+    """Dendrite scraper service configuration.
 
     @param openai_api_key: Optional OpenAI key for gpt-4o-mini cleanup pass.
     @param host: Bind address for the HTTP server.
@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     max_retries: int = 2
     retry_delay_seconds: float = 1.0
 
-    model_config = {"env_prefix": "WEB_SCRAPER_", "env_file": ".env", "extra": "ignore"}
+    model_config = {"env_prefix": "DENDRITE_", "env_file": ".env", "extra": "ignore"}
 
 
 settings = Settings()

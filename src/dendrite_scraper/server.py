@@ -12,8 +12,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from pydantic import BaseModel, HttpUrl
 
-from web_scraper.scraper import ScrapeResult, scrape
-from web_scraper.settings import settings
+from dendrite_scraper.scraper import ScrapeResult, scrape
+from dendrite_scraper.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Log startup configuration."""
-    logger.info("web-scraper starting on %s:%d", settings.host, settings.port)
+    logger.info("dendrite-scraper starting on %s:%d", settings.host, settings.port)
     logger.info(
         "LLM cleanup: %s",
         "enabled" if settings.openai_api_key else "disabled (no OPENAI_API_KEY)",
@@ -30,7 +30,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(
-    title="web-scraper",
+    title="dendrite-scraper",
     description="Scraping service with anti-bot detection, Jina fallback, and LLM cleanup",
     version="0.1.0",
     lifespan=lifespan,

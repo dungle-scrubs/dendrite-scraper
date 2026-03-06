@@ -3,7 +3,7 @@
 All tests mock external calls (crawl4ai, Jina, OpenAI) — no network required.
 """
 
-from web_scraper.scraper import (
+from dendrite_scraper.scraper import (
     clean_markdown_content,
     is_scrape_artifact_line,
     looks_like_bot_block,

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
-from web_scraper.scraper import ScrapeResult
+from dendrite_scraper.scraper import ScrapeResult
 
 
 class TestHealthEndpoint:
@@ -23,7 +23,7 @@ class TestHealthEndpoint:
 class TestScrapeEndpoint:
     """Tests for POST /scrape."""
 
-    @patch("web_scraper.server.scrape", new_callable=AsyncMock)
+    @patch("dendrite_scraper.server.scrape", new_callable=AsyncMock)
     def test_successful_scrape(self, mock_scrape: AsyncMock, client: TestClient) -> None:
         mock_scrape.return_value = ScrapeResult(
             markdown="# Hello\n\nWorld\n",
@@ -44,7 +44,7 @@ class TestScrapeEndpoint:
         assert body["llm_cleaned"] is False
         assert body["error"] is None
 
-    @patch("web_scraper.server.scrape", new_callable=AsyncMock)
+    @patch("dendrite_scraper.server.scrape", new_callable=AsyncMock)
     def test_failed_scrape(self, mock_scrape: AsyncMock, client: TestClient) -> None:
         mock_scrape.return_value = ScrapeResult(
             url="https://example.com",
@@ -61,7 +61,7 @@ class TestScrapeEndpoint:
         assert body["source"] == "none"
         assert body["error"] == "Both crawl4ai and Jina failed"
 
-    @patch("web_scraper.server.scrape", new_callable=AsyncMock)
+    @patch("dendrite_scraper.server.scrape", new_callable=AsyncMock)
     def test_bot_detected_with_jina_fallback(
         self, mock_scrape: AsyncMock, client: TestClient
     ) -> None:

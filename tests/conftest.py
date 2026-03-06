@@ -1,9 +1,9 @@
-"""Shared fixtures for web-scraper tests."""
+"""Shared fixtures for dendrite-scraper tests."""
 
 import pytest
 from fastapi.testclient import TestClient
 
-from web_scraper.server import app
+from dendrite_scraper.server import app
 
 
 @pytest.fixture

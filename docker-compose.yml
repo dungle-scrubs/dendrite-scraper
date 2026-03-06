@@ -1,10 +1,10 @@
 services:
-  web-scraper:
+  dendrite-scraper:
     build: .
     ports:
       - "8020:8020"
     environment:
-      - WEB_SCRAPER_PORT=8020
+      - DENDRITE_PORT=8020
       # Optional: enables gpt-4o-mini content cleanup pass.
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
     restart: unless-stopped

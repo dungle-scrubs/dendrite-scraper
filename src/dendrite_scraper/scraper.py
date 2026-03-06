@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from web_scraper.settings import settings
+from dendrite_scraper.settings import settings
 
 logger = logging.getLogger(__name__)
 

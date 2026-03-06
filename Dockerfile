@@ -28,4 +28,4 @@ RUN uv run crawl4ai-setup 2>/dev/null || uv run python -m playwright install chr
 
 EXPOSE 8020
 
-CMD ["uv", "run", "web-scraper"]
+CMD ["uv", "run", "dendrite-scraper"]

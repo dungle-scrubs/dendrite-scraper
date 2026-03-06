@@ -1,8 +1,13 @@
-# web-scraper
+# dendrite-scraper
 
-Standalone web scraping service with anti-bot detection, Jina fallback,
-and optional LLM cleanup. Runs independently — consumed by tool-proxy,
-tallow, and marrow over HTTP.
+Web scraping service with anti-bot detection, Jina fallback, and optional
+LLM cleanup. Runs as a standalone service or installs as a Python package.
+
+## Install
+
+```bash
+pip install dendrite-scraper
+```
 
 ## API
 
@@ -44,7 +49,7 @@ GET  /health
 
 ```bash
 uv sync
-uv run web-scraper
+uv run dendrite-scraper
 ```
 
 ## Run with Docker
@@ -58,37 +63,33 @@ docker compose up -d
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `OPENAI_API_KEY` | No | Enables gpt-4o-mini content cleanup |
-| `WEB_SCRAPER_PORT` | No | Server port (default: 8020) |
-| `WEB_SCRAPER_HOST` | No | Bind address (default: 0.0.0.0) |
-| `WEB_SCRAPER_CRAWL_TIMEOUT_SECONDS` | No | Crawl4AI timeout (default: 25) |
+| `DENDRITE_PORT` | No | Server port (default: 8020) |
+| `DENDRITE_HOST` | No | Bind address (default: 0.0.0.0) |
+| `DENDRITE_CRAWL_TIMEOUT_SECONDS` | No | Crawl4AI timeout (default: 25) |
 
-## Consumer setup
+## Use as a library
+
+```python
+from dendrite_scraper.scraper import scrape
+
+result = await scrape("https://example.com")
+print(result.markdown)
+```
+
+## Use as a service
 
 All consumers need one env var:
 
 ```bash
-WEB_SCRAPER_URL=http://localhost:8020
+DENDRITE_SCRAPER_URL=http://localhost:8020
 ```
-
-### tool-proxy
-
-Replace `scrape_url()` in `apps/docs/scripts/docs_session.py` with:
 
 ```python
-resp = httpx.post(f"{WEB_SCRAPER_URL}/scrape", json={"url": url})
+import httpx
+
+resp = httpx.post(f"{DENDRITE_SCRAPER_URL}/scrape", json={"url": url})
 data = resp.json()
-return data["markdown"], bool(data["error"])
-```
-
-### tallow / marrow
-
-```typescript
-const resp = await fetch(`${process.env.WEB_SCRAPER_URL}/scrape`, {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ url }),
-});
-const { markdown, error } = await resp.json();
+markdown = data["markdown"]
 ```
 
 ## Tests
@@ -102,3 +103,7 @@ uv run pytest tests/ -v
 ## Port
 
 8020 (registered in the shared port table).
+
+## License
+
+MIT
