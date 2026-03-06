@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/dungle-scrubs/dendrite-scraper/compare/v0.2.0...v0.2.1) (2026-03-06)
+
+
+### Fixed
+
+* **ci:** publish PyPI releases from release workflow ([26c1390](https://github.com/dungle-scrubs/dendrite-scraper/commit/26c139033fe532baf553d596b6a374ea291a784b))
+
 ## [0.2.0](https://github.com/dungle-scrubs/dendrite-scraper/compare/v0.1.0...v0.2.0) (2026-03-06)
 
 
