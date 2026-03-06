@@ -45,11 +45,72 @@ GET  /health
 6. **Artifact stripping** — regex patterns for "Skip to content", GitHub
    chrome, duplicate lines
 
+## CLI
+
+The `dendrite-scraper` command exposes two subcommands:
+
+```bash
+dendrite-scraper scrape <url>       # scrape a URL, JSON on stdout
+dendrite-scraper scrape --stdin     # read {"url": "..."} from stdin
+dendrite-scraper serve              # start the HTTP server
+```
+
+### JSON output (stdout)
+
+Every `scrape` invocation writes exactly one JSON object to stdout:
+
+```json
+{
+  "ok": true,
+  "markdown": "# Page Title\n\nClean content...\n",
+  "source": "crawl4ai",
+  "url": "https://example.com",
+  "bot_detected": false,
+  "llm_cleaned": false,
+  "error": null,
+  "elapsed_ms": 1234.5,
+  "attempts": ["crawl4ai attempt 1"]
+}
+```
+
+On failure, `ok` is `false` and `error` contains the reason. The structure
+is always the same — callers can unconditionally `json.loads(stdout)`.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success — content scraped |
+| 1 | Scrape failed — all backends exhausted |
+| 2 | Invalid input — bad URL or malformed stdin JSON |
+| 3 | Timeout — global deadline exceeded |
+| 4 | Internal error — unexpected crash |
+
+### Timeout
+
+The `--timeout` flag (default: 120s) wraps the entire pipeline in a
+global deadline. When exceeded, the process exits with code 3 and the
+JSON `error` field explains what happened.
+
+```bash
+dendrite-scraper scrape --timeout 30 https://slow-site.example.com
+```
+
+### stdin mode
+
+Pipe a JSON object with a `url` field:
+
+```bash
+echo '{"url": "https://example.com"}' | dendrite-scraper scrape --stdin
+```
+
+All logging goes to stderr. stdout is exclusively for the JSON result.
+
 ## Run locally
 
 ```bash
 uv sync
-uv run dendrite-scraper
+uv run dendrite-scraper serve
 ```
 
 ## Run with Docker
