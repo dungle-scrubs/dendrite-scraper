@@ -1,14 +1,234 @@
 """Unit tests for the scraping pipeline.
 
-All tests mock external calls (crawl4ai, Jina, OpenAI) — no network required.
+These tests cover both the pure markdown helpers and the async orchestration
+paths that actually make the service useful. All external calls are mocked —
+no network and no real browser required.
 """
 
+import builtins
+import sys
+from collections.abc import Mapping, Sequence
+from types import ModuleType
+from typing import Any, cast
+from unittest.mock import AsyncMock, patch
+
+import httpx
+import pytest
+
+import dendrite_scraper.scraper as scraper_module
 from dendrite_scraper.scraper import (
     clean_markdown_content,
+    crawl_url,
     is_scrape_artifact_line,
+    jina_fetch,
+    llm_clean_markdown,
     looks_like_bot_block,
     looks_noisy,
+    maybe_llm_clean,
+    scrape,
 )
+
+
+class FakeCrawlResult:
+    """Minimal Crawl4AI result stub used by crawl_url tests.
+
+    @param success: Whether Crawl4AI reported success.
+    @param markdown: Markdown returned by the crawl.
+    @param error_message: Error message reported by Crawl4AI.
+    """
+
+    def __init__(self, *, success: bool, markdown: str = "", error_message: str = "") -> None:
+        self.success = success
+        self.markdown = markdown
+        self.error_message = error_message
+
+
+class FakeCrawler:
+    """Async context manager that mimics Crawl4AI's crawler object.
+
+    @param result: Fake crawl result to return from arun.
+    @param error: Optional exception to raise from arun.
+    """
+
+    def __init__(
+        self, *, result: FakeCrawlResult | None = None, error: Exception | None = None
+    ) -> None:
+        self.result = result
+        self.error = error
+        self.calls: list[tuple[str, object]] = []
+
+    async def __aenter__(self) -> "FakeCrawler":
+        """Return the fake crawler instance for `async with`.
+
+        @returns: Self.
+        """
+        return self
+
+    async def __aexit__(self, *_args: object) -> bool:
+        """Do not suppress exceptions from the managed block.
+
+        @param _args: Standard async context-manager exit arguments.
+        @returns: False to propagate exceptions.
+        """
+        return False
+
+    async def arun(self, *, url: str, config: object) -> FakeCrawlResult:
+        """Record the call and return or raise the configured result.
+
+        @param url: URL passed to Crawl4AI.
+        @param config: Crawl config object.
+        @returns: Fake crawl result.
+        @throws Exception: Any configured crawler exception.
+        """
+        self.calls.append((url, config))
+        if self.error is not None:
+            raise self.error
+        assert self.result is not None
+        return self.result
+
+
+class FakeResponse:
+    """HTTP response stub used by Jina and OpenAI tests.
+
+    @param status_code: Response status code.
+    @param text: Response body text.
+    @param json_data: JSON payload returned by json().
+    @param json_error: Optional error raised by json().
+    """
+
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        text: str = "",
+        json_data: object | None = None,
+        json_error: Exception | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.text = text
+        self._json_data = json_data
+        self._json_error = json_error
+
+    def json(self) -> object:
+        """Return or fail with the configured JSON payload.
+
+        @returns: Configured JSON payload.
+        @throws Exception: Configured JSON decoding error.
+        """
+        if self._json_error is not None:
+            raise self._json_error
+        return self._json_data
+
+
+class FakeAsyncClient:
+    """Async httpx.AsyncClient substitute with programmable responses.
+
+    @param get_response: Response returned by get().
+    @param post_response: Response returned by post().
+    @param get_error: Optional exception raised by get().
+    @param post_error: Optional exception raised by post().
+    """
+
+    def __init__(
+        self,
+        *,
+        get_response: FakeResponse | None = None,
+        post_response: FakeResponse | None = None,
+        get_error: Exception | None = None,
+        post_error: Exception | None = None,
+    ) -> None:
+        self.get_response = get_response
+        self.post_response = post_response
+        self.get_error = get_error
+        self.post_error = post_error
+        self.last_get: tuple[tuple[object, ...], dict[str, object]] | None = None
+        self.last_post: tuple[tuple[object, ...], dict[str, object]] | None = None
+
+    async def __aenter__(self) -> "FakeAsyncClient":
+        """Return the fake client for `async with`.
+
+        @returns: Self.
+        """
+        return self
+
+    async def __aexit__(self, *_args: object) -> bool:
+        """Do not suppress exceptions from the managed block.
+
+        @param _args: Standard async context-manager exit arguments.
+        @returns: False to propagate exceptions.
+        """
+        return False
+
+    async def get(self, *args: object, **kwargs: object) -> FakeResponse:
+        """Record a GET call and return or raise the configured outcome.
+
+        @param args: Positional request args.
+        @param kwargs: Keyword request args.
+        @returns: Configured fake response.
+        @throws Exception: Configured client error.
+        """
+        self.last_get = (args, kwargs)
+        if self.get_error is not None:
+            raise self.get_error
+        assert self.get_response is not None
+        return self.get_response
+
+    async def post(self, *args: object, **kwargs: object) -> FakeResponse:
+        """Record a POST call and return or raise the configured outcome.
+
+        @param args: Positional request args.
+        @param kwargs: Keyword request args.
+        @returns: Configured fake response.
+        @throws Exception: Configured client error.
+        """
+        self.last_post = (args, kwargs)
+        if self.post_error is not None:
+            raise self.post_error
+        assert self.post_response is not None
+        return self.post_response
+
+
+# ── Helper builders ──────────────────────────────────────────
+
+
+def build_fake_crawl4ai(crawler: FakeCrawler) -> ModuleType:
+    """Create a fake `crawl4ai` module compatible with crawl_url().
+
+    @param crawler: Fake crawler returned from AsyncWebCrawler context manager.
+    @returns: Module-like object with the required Crawl4AI symbols.
+    """
+    module = ModuleType("crawl4ai")
+
+    class BrowserConfig:
+        """Minimal browser-config stub."""
+
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    class CrawlerRunConfig:
+        """Minimal run-config stub."""
+
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    class AsyncWebCrawler:
+        """Context-manager wrapper that yields the provided fake crawler."""
+
+        def __init__(self, *, config: BrowserConfig) -> None:
+            self.config = config
+
+        async def __aenter__(self) -> FakeCrawler:
+            return crawler
+
+        async def __aexit__(self, *_args: object) -> bool:
+            return False
+
+    module_any = cast(Any, module)
+    module_any.AsyncWebCrawler = AsyncWebCrawler
+    module_any.BrowserConfig = BrowserConfig
+    module_any.CrawlerRunConfig = CrawlerRunConfig
+    return module
+
 
 # ── is_scrape_artifact_line ──────────────────────────────────
 
@@ -30,6 +250,9 @@ class TestIsScrapeArtifactLine:
 
     def test_github_signed_out(self) -> None:
         assert is_scrape_artifact_line("You signed out in another tab or window.")
+
+    def test_github_switched_accounts(self) -> None:
+        assert is_scrape_artifact_line("You switched accounts on another tab or window.")
 
     def test_normal_content_not_artifact(self) -> None:
         assert not is_scrape_artifact_line("This is normal documentation content.")
@@ -96,6 +319,18 @@ class TestLooksLikeBotBlock:
         page = "Access denied. You don't have permission."
         assert looks_like_bot_block(page)
 
+    def test_enable_javascript_phrase(self) -> None:
+        page = "Enable JavaScript to continue"
+        assert looks_like_bot_block(page)
+
+    def test_verifies_you_are_not_a_bot_phrase(self) -> None:
+        page = "This page verifies you are not a bot"
+        assert looks_like_bot_block(page)
+
+    def test_this_page_was_lost_in_training_phrase(self) -> None:
+        page = "Sorry, this page was lost in training"
+        assert looks_like_bot_block(page)
+
     def test_long_page_not_bot_block(self) -> None:
         """Long pages with bot phrases are real content, not challenge pages."""
         page = "Cloudflare is a company\n" * 200
@@ -104,7 +339,7 @@ class TestLooksLikeBotBlock:
     def test_partial_js_render(self) -> None:
         """Tables with many empty pipe cells indicate partial JS rendering."""
         rows = "| Name | Score | Status |\n|---|---|---|\n"
-        rows += "| |  | |\n" * 10  # Empty data rows
+        rows += "| |  | |\n" * 10
         assert looks_like_bot_block(rows)
 
     def test_real_table_not_flagged(self) -> None:
@@ -138,3 +373,419 @@ class TestLooksNoisy:
 
     def test_empty_content(self) -> None:
         assert not looks_noisy("")
+
+
+# ── crawl_url ────────────────────────────────────────────────
+
+
+class TestCrawlUrl:
+    """Tests for the Crawl4AI wrapper."""
+
+    @pytest.mark.asyncio
+    async def test_import_error(self) -> None:
+        real_import = builtins.__import__
+
+        def fake_import(
+            name: str,
+            globals: Mapping[str, object] | None = None,
+            locals: Mapping[str, object] | None = None,
+            fromlist: Sequence[str] | None = (),
+            level: int = 0,
+        ) -> ModuleType:
+            if name == "crawl4ai":
+                raise ImportError("missing")
+            return real_import(name, globals, locals, fromlist, level)
+
+        with patch("builtins.__import__", side_effect=fake_import):
+            message, is_error = await crawl_url("https://example.com")
+
+        assert is_error is True
+        assert "crawl4ai is not installed" in message
+
+    @pytest.mark.asyncio
+    async def test_success(self) -> None:
+        crawler = FakeCrawler(result=FakeCrawlResult(success=True, markdown="# Hello\n"))
+        original_stdout = sys.stdout
+
+        with patch.dict(sys.modules, {"crawl4ai": build_fake_crawl4ai(crawler)}):
+            markdown, is_error = await crawl_url("https://example.com")
+
+        assert is_error is False
+        assert markdown == "# Hello\n"
+        assert crawler.calls[0][0] == "https://example.com"
+        assert sys.stdout is original_stdout
+
+    @pytest.mark.asyncio
+    async def test_timeout_restores_stdout(self) -> None:
+        crawler = FakeCrawler(result=FakeCrawlResult(success=True, markdown="# Hello\n"))
+        original_stdout = sys.stdout
+
+        async def fake_wait_for(awaitable: object, timeout: object) -> object:
+            """Close the pending crawl coroutine before simulating a timeout.
+
+            @param awaitable: Awaitable created by crawl_url.
+            @param timeout: Timeout value passed to asyncio.wait_for.
+            @returns: Never returns.
+            @throws TimeoutError: Always, to simulate a deadline breach.
+            """
+            del timeout
+            close = getattr(awaitable, "close", None)
+            if callable(close):
+                close()
+            raise TimeoutError
+
+        with (
+            patch.dict(sys.modules, {"crawl4ai": build_fake_crawl4ai(crawler)}),
+            patch("dendrite_scraper.scraper.asyncio.wait_for", side_effect=fake_wait_for),
+        ):
+            message, is_error = await crawl_url("https://example.com")
+
+        assert is_error is True
+        assert "timed out" in message
+        assert sys.stdout is original_stdout
+
+    @pytest.mark.asyncio
+    async def test_unsuccessful_result(self) -> None:
+        crawler = FakeCrawler(result=FakeCrawlResult(success=False, error_message="blocked"))
+
+        with patch.dict(sys.modules, {"crawl4ai": build_fake_crawl4ai(crawler)}):
+            message, is_error = await crawl_url("https://example.com")
+
+        assert is_error is True
+        assert message == "Crawl failed: blocked"
+
+    @pytest.mark.asyncio
+    async def test_empty_markdown(self) -> None:
+        crawler = FakeCrawler(result=FakeCrawlResult(success=True, markdown="   "))
+
+        with patch.dict(sys.modules, {"crawl4ai": build_fake_crawl4ai(crawler)}):
+            message, is_error = await crawl_url("https://example.com")
+
+        assert is_error is True
+        assert message == "No markdown content returned"
+
+
+# ── jina_fetch ───────────────────────────────────────────────
+
+
+class TestJinaFetch:
+    """Tests for the Jina fallback fetcher."""
+
+    @pytest.mark.asyncio
+    async def test_success(self) -> None:
+        client = FakeAsyncClient(get_response=FakeResponse(status_code=200, text="# Jina\n"))
+
+        with patch("dendrite_scraper.scraper.httpx.AsyncClient", return_value=client):
+            markdown, is_error = await jina_fetch("https://example.com")
+
+        assert is_error is False
+        assert markdown == "# Jina\n"
+        assert client.last_get is not None
+        assert client.last_get[0][0] == "https://r.jina.ai/https://example.com"
+
+    @pytest.mark.asyncio
+    async def test_http_error(self) -> None:
+        client = FakeAsyncClient(get_error=httpx.HTTPError("network down"))
+
+        with patch("dendrite_scraper.scraper.httpx.AsyncClient", return_value=client):
+            message, is_error = await jina_fetch("https://example.com")
+
+        assert is_error is True
+        assert "Jina Reader failed" in message
+
+    @pytest.mark.asyncio
+    async def test_non_200(self) -> None:
+        client = FakeAsyncClient(get_response=FakeResponse(status_code=403, text="forbidden"))
+
+        with patch("dendrite_scraper.scraper.httpx.AsyncClient", return_value=client):
+            message, is_error = await jina_fetch("https://example.com")
+
+        assert is_error is True
+        assert message == "Jina Reader error 403: forbidden"
+
+    @pytest.mark.asyncio
+    async def test_empty_body(self) -> None:
+        client = FakeAsyncClient(get_response=FakeResponse(status_code=200, text="   "))
+
+        with patch("dendrite_scraper.scraper.httpx.AsyncClient", return_value=client):
+            message, is_error = await jina_fetch("https://example.com")
+
+        assert is_error is True
+        assert message == "Jina Reader returned empty content"
+
+
+# ── llm_clean_markdown ───────────────────────────────────────
+
+
+class TestLlmCleanMarkdown:
+    """Tests for the OpenAI cleanup call."""
+
+    @pytest.mark.asyncio
+    async def test_no_api_key_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(scraper_module.settings, "openai_api_key", None)
+        assert await llm_clean_markdown("# Hello\n") is None
+
+    @pytest.mark.asyncio
+    async def test_success_and_input_truncation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = FakeAsyncClient(
+            post_response=FakeResponse(
+                status_code=200,
+                json_data={"choices": [{"message": {"content": "# Clean\n"}}]},
+            )
+        )
+        monkeypatch.setattr(scraper_module.settings, "openai_api_key", "test-key")
+        monkeypatch.setattr(scraper_module.settings, "llm_clean_max_input_chars", 5)
+
+        with patch("dendrite_scraper.scraper.httpx.AsyncClient", return_value=client):
+            cleaned = await llm_clean_markdown("123456789")
+
+        assert cleaned == "# Clean\n"
+        assert client.last_post is not None
+        payload = cast(dict[str, Any], client.last_post[1]["json"])
+        messages = cast(list[dict[str, Any]], payload["messages"])
+        assert messages[1]["content"] == "12345"
+
+    @pytest.mark.asyncio
+    async def test_http_error_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = FakeAsyncClient(post_error=httpx.HTTPError("boom"))
+        monkeypatch.setattr(scraper_module.settings, "openai_api_key", "test-key")
+
+        with patch("dendrite_scraper.scraper.httpx.AsyncClient", return_value=client):
+            cleaned = await llm_clean_markdown("# Hello\n")
+
+        assert cleaned is None
+
+    @pytest.mark.asyncio
+    async def test_non_200_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = FakeAsyncClient(post_response=FakeResponse(status_code=500, text="nope"))
+        monkeypatch.setattr(scraper_module.settings, "openai_api_key", "test-key")
+
+        with patch("dendrite_scraper.scraper.httpx.AsyncClient", return_value=client):
+            cleaned = await llm_clean_markdown("# Hello\n")
+
+        assert cleaned is None
+
+    @pytest.mark.asyncio
+    async def test_bad_json_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = FakeAsyncClient(
+            post_response=FakeResponse(status_code=200, json_error=ValueError())
+        )
+        monkeypatch.setattr(scraper_module.settings, "openai_api_key", "test-key")
+
+        with patch("dendrite_scraper.scraper.httpx.AsyncClient", return_value=client):
+            cleaned = await llm_clean_markdown("# Hello\n")
+
+        assert cleaned is None
+
+    @pytest.mark.asyncio
+    async def test_empty_content_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = FakeAsyncClient(
+            post_response=FakeResponse(
+                status_code=200,
+                json_data={"choices": [{"message": {"content": "   "}}]},
+            )
+        )
+        monkeypatch.setattr(scraper_module.settings, "openai_api_key", "test-key")
+
+        with patch("dendrite_scraper.scraper.httpx.AsyncClient", return_value=client):
+            cleaned = await llm_clean_markdown("# Hello\n")
+
+        assert cleaned is None
+
+
+# ── maybe_llm_clean ──────────────────────────────────────────
+
+
+class TestMaybeLlmClean:
+    """Tests for the conditional LLM cleanup gate."""
+
+    @pytest.mark.asyncio
+    async def test_non_noisy_skips_llm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(scraper_module.settings, "openai_api_key", "test-key")
+
+        with patch(
+            "dendrite_scraper.scraper.llm_clean_markdown", new_callable=AsyncMock
+        ) as mock_clean:
+            cleaned, used_llm = await maybe_llm_clean("plain content")
+
+        assert cleaned == "plain content"
+        assert used_llm is False
+        mock_clean.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_api_key_skips_llm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(scraper_module.settings, "openai_api_key", None)
+        noisy = "\n".join(f"[Link {i}](https://example.com/{i})" for i in range(20))
+
+        with patch(
+            "dendrite_scraper.scraper.llm_clean_markdown", new_callable=AsyncMock
+        ) as mock_clean:
+            cleaned, used_llm = await maybe_llm_clean(noisy)
+
+        assert cleaned == noisy
+        assert used_llm is False
+        mock_clean.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_noisy_content_uses_llm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(scraper_module.settings, "openai_api_key", "test-key")
+        noisy = "\n".join(f"[Link {i}](https://example.com/{i})" for i in range(20))
+
+        with patch(
+            "dendrite_scraper.scraper.llm_clean_markdown",
+            new=AsyncMock(return_value="# Clean\n"),
+        ):
+            cleaned, used_llm = await maybe_llm_clean(noisy)
+
+        assert cleaned == "# Clean\n"
+        assert used_llm is True
+
+    @pytest.mark.asyncio
+    async def test_llm_failure_falls_back_to_original(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(scraper_module.settings, "openai_api_key", "test-key")
+        noisy = "\n".join(f"[Link {i}](https://example.com/{i})" for i in range(20))
+
+        with patch("dendrite_scraper.scraper.llm_clean_markdown", new=AsyncMock(return_value=None)):
+            cleaned, used_llm = await maybe_llm_clean(noisy)
+
+        assert cleaned == noisy
+        assert used_llm is False
+
+
+# ── scrape orchestration ─────────────────────────────────────
+
+
+class TestScrape:
+    """Tests for the top-level scrape pipeline."""
+
+    @pytest.mark.asyncio
+    async def test_crawl4ai_success(self) -> None:
+        with (
+            patch(
+                "dendrite_scraper.scraper.crawl_url",
+                new=AsyncMock(return_value=("# Title\n", False)),
+            ),
+            patch("dendrite_scraper.scraper.jina_fetch", new=AsyncMock()) as mock_jina,
+        ):
+            result = await scrape("https://example.com")
+
+        assert result.source == "crawl4ai"
+        assert result.markdown == "# Title\n"
+        assert result.error is None
+        assert result.attempts == ["crawl4ai attempt 1"]
+        mock_jina.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_retry_then_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(scraper_module.settings, "max_retries", 2)
+        monkeypatch.setattr(scraper_module.settings, "retry_delay_seconds", 0)
+
+        with (
+            patch(
+                "dendrite_scraper.scraper.crawl_url",
+                new=AsyncMock(side_effect=[("transient failure", True), ("# Final\n", False)]),
+            ),
+            patch("dendrite_scraper.scraper.asyncio.sleep", new=AsyncMock()) as mock_sleep,
+        ):
+            result = await scrape("https://example.com")
+
+        assert result.source == "crawl4ai"
+        assert result.markdown == "# Final\n"
+        assert result.attempts == ["crawl4ai attempt 1", "crawl4ai attempt 2"]
+        mock_sleep.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_bot_detection_falls_back_to_jina(self) -> None:
+        with (
+            patch(
+                "dendrite_scraper.scraper.crawl_url",
+                new=AsyncMock(return_value=("Just a moment", False)),
+            ),
+            patch(
+                "dendrite_scraper.scraper.jina_fetch",
+                new=AsyncMock(return_value=("# Jina\n", False)),
+            ),
+        ):
+            result = await scrape("https://example.com")
+
+        assert result.source == "jina"
+        assert result.markdown == "# Jina\n"
+        assert result.bot_detected is True
+        assert result.attempts == [
+            "crawl4ai attempt 1",
+            "bot protection detected",
+            "jina fallback",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_non_transient_timeout_breaks_retry_loop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(scraper_module.settings, "max_retries", 3)
+
+        with (
+            patch(
+                "dendrite_scraper.scraper.crawl_url",
+                new=AsyncMock(return_value=("Crawl timed out after 25s", True)),
+            ) as mock_crawl,
+            patch(
+                "dendrite_scraper.scraper.jina_fetch",
+                new=AsyncMock(return_value=("Jina Reader failed: nope", True)),
+            ),
+        ):
+            result = await scrape("https://example.com")
+
+        assert result.source == "none"
+        assert result.error == "Crawl timed out after 25s"
+        assert result.attempts == ["crawl4ai attempt 1", "jina fallback"]
+        assert mock_crawl.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_crawl_exception_uses_last_crash_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(scraper_module.settings, "max_retries", 2)
+        monkeypatch.setattr(scraper_module.settings, "retry_delay_seconds", 0)
+
+        with (
+            patch(
+                "dendrite_scraper.scraper.crawl_url",
+                new=AsyncMock(side_effect=[RuntimeError("boom 1"), RuntimeError("boom 2")]),
+            ),
+            patch(
+                "dendrite_scraper.scraper.jina_fetch",
+                new=AsyncMock(return_value=("Jina Reader failed: nope", True)),
+            ),
+            patch("dendrite_scraper.scraper.asyncio.sleep", new=AsyncMock()) as mock_sleep,
+        ):
+            result = await scrape("https://example.com")
+
+        assert result.source == "none"
+        assert result.error == "Scrape crashed: boom 2"
+        assert result.attempts == ["crawl4ai attempt 1", "crawl4ai attempt 2", "jina fallback"]
+        mock_sleep.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_jina_success_can_mark_llm_cleaned(self) -> None:
+        noisy = "\n".join(f"[Link {i}](https://example.com/{i})" for i in range(20))
+
+        with (
+            patch(
+                "dendrite_scraper.scraper.crawl_url",
+                new=AsyncMock(return_value=("Just a moment", False)),
+            ),
+            patch(
+                "dendrite_scraper.scraper.jina_fetch", new=AsyncMock(return_value=(noisy, False))
+            ),
+            patch(
+                "dendrite_scraper.scraper.maybe_llm_clean",
+                new=AsyncMock(return_value=("# Clean\n", True)),
+            ),
+        ):
+            result = await scrape("https://example.com")
+
+        assert result.source == "jina"
+        assert result.llm_cleaned is True
+        assert result.markdown == "# Clean\n"

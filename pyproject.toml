@@ -23,7 +23,7 @@ build-backend = "hatchling.build"
 packages = ["src/dendrite_scraper"]
 
 [project.scripts]
-dendrite-scraper = "dendrite_scraper.__main__:main"
+dendrite-scraper = "dendrite_scraper.cli:main"
 
 [dependency-groups]
 dev = [
