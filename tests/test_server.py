@@ -19,6 +19,11 @@ class TestHealthEndpoint:
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
 
+    def test_response_shape_is_stable(self, client: TestClient) -> None:
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        assert set(resp.json().keys()) == {"status"}
+
 
 class TestScrapeEndpoint:
     """Tests for POST /scrape."""
@@ -37,12 +42,24 @@ class TestScrapeEndpoint:
         assert resp.status_code == 200
 
         body = resp.json()
+        assert set(body.keys()) == {
+            "markdown",
+            "source",
+            "url",
+            "bot_detected",
+            "llm_cleaned",
+            "error",
+            "elapsed_ms",
+            "attempts",
+        }
         assert body["markdown"] == "# Hello\n\nWorld\n"
         assert body["source"] == "crawl4ai"
         assert body["url"] == "https://example.com"
         assert body["bot_detected"] is False
         assert body["llm_cleaned"] is False
         assert body["error"] is None
+        assert body["elapsed_ms"] == 150.0
+        assert body["attempts"] == ["crawl4ai attempt 1"]
 
     @patch("dendrite_scraper.server.scrape", new_callable=AsyncMock)
     def test_failed_scrape(self, mock_scrape: AsyncMock, client: TestClient) -> None:
@@ -57,9 +74,24 @@ class TestScrapeEndpoint:
         assert resp.status_code == 200
 
         body = resp.json()
+        assert set(body.keys()) == {
+            "markdown",
+            "source",
+            "url",
+            "bot_detected",
+            "llm_cleaned",
+            "error",
+            "elapsed_ms",
+            "attempts",
+        }
         assert body["markdown"] == ""
         assert body["source"] == "none"
+        assert body["url"] == "https://example.com"
+        assert body["bot_detected"] is False
+        assert body["llm_cleaned"] is False
         assert body["error"] == "Both crawl4ai and Jina failed"
+        assert body["elapsed_ms"] == 5000.0
+        assert body["attempts"] == ["crawl4ai attempt 1", "crawl4ai attempt 2", "jina fallback"]
 
     @patch("dendrite_scraper.server.scrape", new_callable=AsyncMock)
     def test_bot_detected_with_jina_fallback(
