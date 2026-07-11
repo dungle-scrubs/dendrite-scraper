@@ -1,5 +1,5 @@
-# Pin to the declared floor (requires-python >=3.12). Pin by digest for production.
-FROM python:3.12-slim-bookworm
+# Pin to the declared floor (requires-python >=3.12), pinned by digest (multi-arch index).
+FROM python:3.12-slim-bookworm@sha256:8a7e7cc04fd3e2bd787f7f24e22d5d119aa590d429b50c95dfe12b3abe52f48b
 
 # Playwright system deps for crawl4ai's headless Chromium.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -9,8 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2 libasound2 libwayland-client0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv (pin by version; for production pin by digest).
-COPY --from=ghcr.io/astral-sh/uv:0.9.4 /uv /usr/local/bin/uv
+# Install uv, pinned by digest (multi-arch index; tag: 0.9.4).
+COPY --from=ghcr.io/astral-sh/uv:0.9.4@sha256:c4089b0085cf4d38e38d5cdaa5e57752c1878a6f41f2e3a3a234dc5f23942cb4 /uv /usr/local/bin/uv
 
 # Run as an unprivileged user — Chromium must not run as root.
 RUN useradd --create-home --uid 10001 appuser

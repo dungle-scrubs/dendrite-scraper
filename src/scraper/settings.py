@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    """Dendrite scraper service configuration.
+    """scraper service configuration.
 
     @param jina_enabled: Opt-in flag for the third-party Jina Reader fallback (default off).
     @param api_key: Optional API key; when set, POST /scrape requires a matching key.
@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     @param jina_timeout_seconds: Per-URL Jina Reader timeout.
     @param jina_max_bytes: Reject a Jina response whose declared length exceeds this.
     @param max_markdown_chars: Cap on scraped markdown length before heuristics/cleaning.
-    @param max_retries: Crawl4AI retry attempts on transient errors.
+    @param max_retries: Crawl4AI crawl attempts on transient errors (at least 1).
     @param retry_delay_seconds: Delay between retries.
     @param max_redirects: Maximum redirect hops the browser may follow per crawl.
     @param crawl_render_delay_seconds: Fixed delay before crawl4ai captures HTML,
@@ -34,12 +34,12 @@ class Settings(BaseSettings):
     port: int = Field(8020, ge=1, le=65535)
     server_timeout_seconds: float = Field(120.0, ge=0)
     max_concurrent_scrapes: int = Field(4, ge=1)
-    scrape_acquire_timeout_seconds: float = Field(5.0, ge=0)
+    scrape_acquire_timeout_seconds: float = Field(5.0, gt=0)
     crawl_timeout_seconds: float = Field(25.0, ge=0)
     jina_timeout_seconds: float = Field(30.0, ge=0)
     jina_max_bytes: int = Field(5_000_000, ge=1)
     max_markdown_chars: int = Field(1_000_000, ge=1)
-    max_retries: int = Field(2, ge=0)
+    max_retries: int = Field(2, ge=1)
     retry_delay_seconds: float = Field(1.0, ge=0)
     max_redirects: int = Field(5, ge=0)
     crawl_render_delay_seconds: float = Field(0.0, ge=0)

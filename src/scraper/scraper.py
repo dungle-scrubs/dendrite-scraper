@@ -50,15 +50,23 @@ BOT_DETECTION_PHRASES = (
     # that appear in legitimate content. These phrases name the challenge page
     # itself, so a real doc merely discussing the provider no longer trips it.
     "checking your browser before accessing",
-    "cf-browser-verification",
-    "cloudflare ray id",
-    "attention required! | cloudflare",
     "captcha to continue",
     "complete the captcha",
     "enable javascript to continue",
     "this page was lost in training",
     "access denied",
     "just a moment",
+)
+
+# Strong, specific bot-challenge signals. Any one of these is decisive on its
+# own (F8): these strings only appear on an actual challenge/interstitial page,
+# so they flag a block regardless of heading presence or page length - a real
+# doc discussing a provider never emits a "cf-browser-verification" token or a
+# rendered "attention required! | cloudflare" heading.
+STRONG_BOT_SIGNALS = (
+    "cloudflare ray id",
+    "cf-browser-verification",
+    "attention required! | cloudflare",
 )
 
 # Challenge-page heuristic thresholds (see looks_like_bot_block). Requiring all
@@ -70,8 +78,15 @@ BOT_CHALLENGE_MAX_WORDS = 150
 # Partial-JS-render heuristic thresholds. A markdown table row with empty cells
 # between the pipes (e.g. "|  |  |") signals the DOM rendered but the data did
 # not. Whitespace inside the cells is collapsed before matching so tabs / varied
-# padding don't defeat detection.
+# padding don't defeat detection. Requiring a minimum count of empty-cell rows
+# AND that empty cells DOMINATE the table (BOT_EMPTY_CELL_MIN_RATIO of all pipe
+# rows) - plus the absence of a heading / substantive prose - keeps a legit 6+
+# row comparison table with a couple of blanks from being flagged (F3).
 BOT_EMPTY_CELL_MIN_ROWS = 5
+BOT_EMPTY_CELL_MIN_RATIO = 0.7
+# Words of non-table, non-heading text above which a page is treated as real
+# content rather than a blank rendered table (F3).
+BOT_TABLE_PROSE_MIN_WORDS = 25
 _EMPTY_CELL_RE = re.compile(r"\|\s*\|")
 
 SCRAPE_ARTIFACT_LINE_PATTERNS = (
@@ -192,13 +207,37 @@ def is_scrape_artifact_line(line: str) -> bool:
 def clean_markdown_content(markdown: str) -> str:
     """Remove known scrape artifacts and normalize markdown whitespace.
 
+    Fenced code blocks are emitted verbatim: while inside a fence, artifact
+    stripping, adjacent-duplicate collapsing, and blank-run collapsing are all
+    suspended so legitimate code (repeated `print(1)` lines, stray `}`, identical
+    config lines, intentional blank lines) survives intact. A fence toggles on any
+    line whose stripped form starts with a code fence marker (``` or ~~~). Only
+    whole-document leading/trailing whitespace is trimmed.
+
     @param markdown: Raw markdown from any scraping source.
     @returns: Cleaned markdown with artifacts removed and whitespace normalized.
     """
     cleaned_lines: list[str] = []
+    in_code_fence = False
 
     for line in markdown.splitlines():
         normalized = line.rstrip()
+
+        stripped = normalized.lstrip()
+        is_fence = stripped.startswith("```") or stripped.startswith("~~~")
+
+        # Inside a fence, emit lines verbatim - no artifact stripping, no dedup.
+        if in_code_fence:
+            cleaned_lines.append(normalized)
+            if is_fence:
+                in_code_fence = False
+            continue
+
+        if is_fence:
+            in_code_fence = True
+            cleaned_lines.append(normalized)
+            continue
+
         if is_scrape_artifact_line(normalized):
             continue
 
@@ -206,10 +245,16 @@ def clean_markdown_content(markdown: str) -> str:
         if normalized and cleaned_lines and normalized == cleaned_lines[-1]:
             continue
 
+        # Collapse blank-line runs to a single blank line. Done here (outside
+        # fences) rather than with a whole-string regex so intentional blank
+        # lines inside code blocks - emitted verbatim above - are preserved.
+        # Also drops leading blank lines; trailing ones are trimmed below.
+        if not normalized and (not cleaned_lines or cleaned_lines[-1] == ""):
+            continue
+
         cleaned_lines.append(normalized)
 
-    cleaned = "\n".join(cleaned_lines)
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    cleaned = "\n".join(cleaned_lines).strip()
     return f"{cleaned}\n" if cleaned else ""
 
 
@@ -229,11 +274,18 @@ def looks_like_bot_block(markdown: str) -> bool:
     """
     lower = markdown.lower()
 
+    # Strong, specific signals are decisive on their own (F8): these strings only
+    # appear on an actual challenge/interstitial page, so they flag a block
+    # regardless of the heading / length gating that governs the weaker phrases.
+    if any(signal in lower for signal in STRONG_BOT_SIGNALS):
+        return True
+
+    has_heading = any(line.lstrip().startswith("#") for line in markdown.splitlines())
+
     # Challenge pages are short, heading-less, and terse. Requiring all three
     # avoids false positives on legitimate short docs that merely mention a
     # provider name like "cloudflare".
     has_phrase = any(phrase in lower for phrase in BOT_DETECTION_PHRASES)
-    has_heading = any(line.lstrip().startswith("#") for line in markdown.splitlines())
     word_count = len(lower.split())
     if (
         has_phrase
@@ -245,11 +297,27 @@ def looks_like_bot_block(markdown: str) -> bool:
 
     # Partial JS rendering: rows with many empty cells between pipes. Cells are
     # matched after collapsing internal whitespace so tabs / varied padding
-    # don't slip past the old "|  |" / "| |" substring check.
+    # don't slip past the old "|  |" / "| |" substring check. To avoid flagging a
+    # legit comparison table that carries a few blanks (F3), require BOTH a
+    # minimum count of empty-cell rows AND that empty cells DOMINATE the table
+    # (>= BOT_EMPTY_CELL_MIN_RATIO of all pipe rows), AND that the page has no
+    # heading or substantive prose anchoring it as real content.
     pipe_rows = [line for line in markdown.splitlines() if "|" in line and "---" not in line]
     if pipe_rows:
         empty_cell_rows = sum(1 for row in pipe_rows if _EMPTY_CELL_RE.search(row))
-        if empty_cell_rows > BOT_EMPTY_CELL_MIN_ROWS:
+        dominates = empty_cell_rows >= BOT_EMPTY_CELL_MIN_RATIO * len(pipe_rows)
+        prose_words = sum(
+            len(line.split())
+            for line in markdown.splitlines()
+            if line.strip() and "|" not in line and not line.lstrip().startswith("#")
+        )
+        has_substantive_prose = prose_words >= BOT_TABLE_PROSE_MIN_WORDS
+        if (
+            empty_cell_rows > BOT_EMPTY_CELL_MIN_ROWS
+            and dominates
+            and not has_heading
+            and not has_substantive_prose
+        ):
             return True
 
     return False
@@ -347,8 +415,10 @@ async def crawl_url(url: str) -> tuple[str, bool]:
     """
     # Pre-flight SSRF guard: reject before launching a browser at all.
     # Offloaded to a thread so the blocking getaddrinfo can't stall the loop.
+    # Capture the sanitized target so the browser navigates the userinfo-stripped,
+    # host-normalized URL rather than the raw input (matches jina_fetch).
     try:
-        await validate_url_async(url)
+        target = await validate_url_async(url)
     except UrlRejected as exc:
         return f"Blocked: {exc.reason}", True
 
@@ -395,7 +465,7 @@ async def crawl_url(url: str) -> tuple[str, bool]:
                 strategy.set_hook("on_page_context_created", _install_route_guard)
 
                 result = await asyncio.wait_for(
-                    crawler.arun(url=url, config=run_config),
+                    crawler.arun(url=target.url, config=run_config),
                     timeout=settings.crawl_timeout_seconds,
                 )
     except TimeoutError:
@@ -464,8 +534,11 @@ async def jina_fetch(url: str) -> tuple[str, bool]:
                 if total > cap:
                     return f"Jina Reader response too large (>{cap} bytes)", True
                 chunks.append(chunk)
-    except httpx.HTTPError as e:
-        return f"Jina Reader failed: {e}", True
+    except httpx.HTTPError:
+        # Log the library detail server-side; do not reflect it to the caller -
+        # raw transport exception text can leak internal host/proxy details (M10).
+        logger.warning("Jina Reader transport error for %s", target.host, exc_info=True)
+        return "Jina Reader failed", True
 
     markdown = b"".join(chunks).decode("utf-8", errors="replace")
     if not markdown.strip():
@@ -504,8 +577,11 @@ async def scrape(url: str) -> ScrapeResult:
         result.attempts.append(f"crawl4ai attempt {attempt + 1}")
         try:
             markdown, err = await crawl_url(url)
-        except Exception as e:
-            crawl_error = f"Scrape crashed: {e}"
+        except Exception:
+            # Log the full traceback server-side; return a generic message so raw
+            # library exception text never reaches the caller (M10).
+            logger.exception("Scrape crashed on attempt %d for %s", attempt + 1, url)
+            crawl_error = "Scrape crashed"
             if attempt < settings.max_retries - 1:
                 await asyncio.sleep(settings.retry_delay_seconds)
             continue
@@ -552,6 +628,9 @@ async def scrape(url: str) -> ScrapeResult:
         return result
 
     # ── Both failed ──────────────────────────────────────────
-    result.error = crawl_error or jina_md
+    # Jina ran last and its failure is the most relevant to the caller, so
+    # surface Jina's own error; fall back to the crawl error only when Jina
+    # produced no message (F9).
+    result.error = jina_md or crawl_error
     result.elapsed_ms = (time.monotonic() - start) * 1000
     return result

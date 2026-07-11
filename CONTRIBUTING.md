@@ -22,6 +22,9 @@ uv run ty check
 
 # Tests
 uv run pytest tests/ -v
+
+# Dependency audit
+uv run --with pip-audit pip-audit
 ```
 
 All five checks run in CI on every pull request.

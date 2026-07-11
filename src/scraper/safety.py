@@ -56,7 +56,9 @@ Resolver = Callable[[str], list[str]]
 class UrlRejected(ValueError):
     """Raised when a URL or redirect target fails the SSRF safety guard.
 
-    @param reason: Short machine-friendly reason (safe to log, not to reflect).
+    @param reason: Generic, caller-safe reason string - a category label or an
+        echo of caller-supplied input, intended both for logging and for
+        surfacing back to callers (contains no sensitive internal detail).
     @param url: The offending URL, when available.
     @param host: The offending host, when available.
     """

@@ -182,7 +182,7 @@ markdown = data["markdown"]
 uv run pytest tests/ -v
 ```
 
-177 tests, all mocked — no network required.
+All mocked - no network required.
 
 ## Port
 
