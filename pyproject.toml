@@ -13,6 +13,10 @@ dependencies = [
     # Pinned at the runtime layer (not just the uv override) so published-wheel
     # consumers also get the patched lxml line, since crawl4ai pins lxml~=5.3.
     "lxml>=6.1.1",
+    # Security floor: crawl4ai pulls nltk transitively (>=3.9.1, uncapped) and
+    # nltk <=3.9.4 is vulnerable to CVE-2026-12243 / PYSEC-2026-597 (percent-
+    # encoded path traversal in nltk.data.load/find). Fixed in 3.10.0.
+    "nltk>=3.10.0",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
     # Security floor: fastapi only requires starlette>=0.46, which allows the

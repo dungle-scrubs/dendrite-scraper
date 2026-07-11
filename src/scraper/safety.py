@@ -56,7 +56,9 @@ Resolver = Callable[[str], list[str]]
 class UrlRejected(ValueError):
     """Raised when a URL or redirect target fails the SSRF safety guard.
 
-    @param reason: Short machine-friendly reason (safe to log, not to reflect).
+    @param reason: Generic, caller-safe reason string - a category label or an
+        echo of caller-supplied input, intended both for logging and for
+        surfacing back to callers (contains no sensitive internal detail).
     @param url: The offending URL, when available.
     @param host: The offending host, when available.
     """
@@ -150,9 +152,16 @@ def classify_ip(ip: str) -> str | None:
     # embedded v4 is private — are handled explicitly here.
     embedded = _embedded_ipv4(addr)
     if embedded is not None:
+        # The embedded IPv4 is the real destination, so its classification is
+        # authoritative: return it directly instead of also consulting the
+        # ::ffff: / ::a.b.c.d / 64:ff9b:: wrapper's own is_reserved/is_global
+        # flags. Those flags for the IPv4-mapped block vary across CPython patch
+        # releases (3.12.3 reports it reserved; 3.12.4+/3.13 do not), so falling
+        # through here would over-block a mapped *public* IPv4 on some
+        # interpreters. Classifying the embedded IPv4 is both correct and
+        # version-stable.
         reason = classify_ip(str(embedded))
-        if reason is not None:
-            return f"embedded-ipv4: {reason}"
+        return f"embedded-ipv4: {reason}" if reason is not None else None
 
     if addr.is_unspecified:
         return "unspecified"

@@ -402,6 +402,50 @@ class TestCleanMarkdownContent:
         cleaned = clean_markdown_content("Hello")
         assert cleaned.endswith("\n")
 
+    def test_fenced_code_preserves_duplicate_lines(self) -> None:
+        """F4: identical consecutive lines inside a fence must not be deduped."""
+        raw = "```python\nprint(1)\nprint(1)\n```"
+        cleaned = clean_markdown_content(raw)
+        assert cleaned == "```python\nprint(1)\nprint(1)\n```\n"
+        assert cleaned.count("print(1)") == 2
+
+    def test_fenced_code_preserves_repeated_braces_and_config(self) -> None:
+        """F4: repeated closing braces / config lines survive inside a fence."""
+        raw = "```\n}\n}\nkey = 1\nkey = 1\n```"
+        cleaned = clean_markdown_content(raw)
+        assert cleaned == "```\n}\n}\nkey = 1\nkey = 1\n```\n"
+
+    def test_fenced_code_keeps_artifact_looking_lines(self) -> None:
+        """F4: an artifact-looking line inside a fence is emitted verbatim."""
+        raw = "```\nDismiss alert\nDismiss alert\n```"
+        cleaned = clean_markdown_content(raw)
+        assert cleaned.count("Dismiss alert") == 2
+
+    def test_tilde_fence_preserves_duplicate_lines(self) -> None:
+        """F4: tilde fences (~~~) toggle code state too."""
+        raw = "~~~\nsame\nsame\n~~~"
+        cleaned = clean_markdown_content(raw)
+        assert cleaned.count("same") == 2
+
+    def test_dedup_still_applies_outside_fences(self) -> None:
+        """F4: dedup and artifact stripping remain active outside fences."""
+        raw = "Line\nLine\n\n```\ncode\ncode\n```\nTail\nTail\n"
+        cleaned = clean_markdown_content(raw)
+        assert cleaned.count("Line") == 1
+        assert cleaned.count("code") == 2
+        assert cleaned.count("Tail") == 1
+
+    def test_fenced_code_preserves_internal_blank_line_runs(self) -> None:
+        """F4: 3+ consecutive blank lines inside a fence are NOT collapsed."""
+        raw = "```python\ndef a():\n    pass\n\n\n\ndef b():\n    pass\n```"
+        cleaned = clean_markdown_content(raw)
+        assert cleaned == "```python\ndef a():\n    pass\n\n\n\ndef b():\n    pass\n```\n"
+
+    def test_blank_runs_still_collapse_outside_fences(self) -> None:
+        """F4: outside a fence, a run of blank lines still collapses to one."""
+        cleaned = clean_markdown_content("A\n\n\n\nB\n")
+        assert cleaned == "A\n\nB\n"
+
 
 # ── looks_like_bot_block ─────────────────────────────────────
 
@@ -470,6 +514,42 @@ class TestLooksLikeBotBlock:
 
     def test_terse_headingless_challenge_still_flagged(self) -> None:
         assert looks_like_bot_block("Just a moment...\nPerforming security verification")
+
+    def test_strong_signal_with_heading_still_flagged(self) -> None:
+        """F8: a strong signal is decisive even behind a heading (challenge H1)."""
+        page = "# Attention Required! | Cloudflare\n\nPlease wait while we verify you.\n"
+        assert looks_like_bot_block(page)
+
+    def test_strong_signal_in_long_page_still_flagged(self) -> None:
+        """F8: a strong signal fires regardless of page length / word count."""
+        page = "Real looking documentation paragraph. " * 200 + "\ncf-browser-verification\n"
+        assert looks_like_bot_block(page)
+
+    def test_cloudflare_ray_id_strong_signal(self) -> None:
+        page = "# Some Page\n\nCloudflare Ray ID: 7a1b2c3d4e5f\n"
+        assert looks_like_bot_block(page)
+
+    def test_comparison_table_with_a_few_blanks_not_flagged(self) -> None:
+        """F3: a legit 6+ row comparison table with a couple blanks is not a block."""
+        page = (
+            "# Feature Comparison\n\n"
+            "This guide compares the two plans across the features that matter most.\n\n"
+            "| Feature | Basic | Pro |\n"
+            "|---|---|---|\n"
+            "| Speed | fast | faster |\n"
+            "| Storage | 10GB | 100GB |\n"
+            "| Support |  |  |\n"
+            "| Backups | daily | hourly |\n"
+            "| SLA | 99% | 99.9% |\n"
+            "| Users | 5 | unlimited |\n"
+        )
+        assert not looks_like_bot_block(page)
+
+    def test_blank_rendered_table_without_heading_still_flagged(self) -> None:
+        """F3: a genuinely blank rendered table (no heading/prose) is still a block."""
+        rows = "| Name | Score | Status |\n|---|---|---|\n"
+        rows += "| |  | |\n" * 8
+        assert looks_like_bot_block(rows)
 
 
 class TestNonRetryableCrawlError:
@@ -584,6 +664,18 @@ class TestCrawlUrl:
         assert message == "No markdown content returned"
 
     @pytest.mark.asyncio
+    async def test_arun_receives_credential_stripped_url(self) -> None:
+        """F6: the browser must navigate the sanitized (userinfo-stripped) URL."""
+        crawler = FakeCrawler(result=FakeCrawlResult(success=True, markdown="# Hi\n"))
+
+        with patch.dict(sys.modules, {"crawl4ai": build_fake_crawl4ai(crawler)}):
+            await crawl_url("http://user:pass@example.com/")
+
+        sent_url = crawler.calls[0][0]
+        assert sent_url == "http://example.com/"
+        assert "user" not in sent_url and "pass" not in sent_url
+
+    @pytest.mark.asyncio
     async def test_attaches_route_guard_via_set_hook(self) -> None:
         """crawl_url must register the guard hook on the crawler strategy (F6)."""
         crawler = FakeCrawler(result=FakeCrawlResult(success=True, markdown="# Hi\n"))
@@ -664,13 +756,16 @@ class TestJinaFetch:
 
     @pytest.mark.asyncio
     async def test_http_error(self) -> None:
-        client = FakeAsyncClient(stream_error=httpx.HTTPError("network down"))
+        client = FakeAsyncClient(stream_error=httpx.HTTPError("network down: 10.0.0.1"))
 
         with patch("scraper.scraper.httpx.AsyncClient", return_value=client):
             message, is_error = await jina_fetch("https://example.com")
 
         assert is_error is True
-        assert "Jina Reader failed" in message
+        # M10: generic message, no interpolated transport-exception detail.
+        assert message == "Jina Reader failed"
+        assert "network down" not in message
+        assert "10.0.0.1" not in message
 
     @pytest.mark.asyncio
     async def test_non_200(self) -> None:
@@ -776,40 +871,68 @@ class TestScrape:
             ) as mock_crawl,
             patch(
                 "scraper.scraper.jina_fetch",
-                new=AsyncMock(return_value=("Jina Reader failed: nope", True)),
+                new=AsyncMock(return_value=("Jina Reader failed", True)),
+            ),
+        ):
+            result = await scrape("https://example.com")
+
+        assert result.source == "none"
+        # F9: Jina ran last and failed, so its error is surfaced (not the crawl error).
+        assert result.error == "Jina Reader failed"
+        assert result.attempts == ["crawl4ai attempt 1", "jina fallback"]
+        assert mock_crawl.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_both_failed_falls_back_to_crawl_error_when_jina_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """F9: an empty Jina message falls back to the crawl error."""
+        monkeypatch.setattr(scraper_module.settings, "jina_enabled", True)
+
+        with (
+            patch(
+                "scraper.scraper.crawl_url",
+                new=AsyncMock(return_value=("Crawl timed out after 25s", True)),
+            ),
+            patch(
+                "scraper.scraper.jina_fetch",
+                new=AsyncMock(return_value=("", True)),
             ),
         ):
             result = await scrape("https://example.com")
 
         assert result.source == "none"
         assert result.error == "Crawl timed out after 25s"
-        assert result.attempts == ["crawl4ai attempt 1", "jina fallback"]
-        assert mock_crawl.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_crawl_exception_uses_last_crash_error(
+    async def test_crawl_exception_returns_generic_message(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """M10: a crawl exception must not leak raw library text to the caller.
+
+        Jina is disabled so the crawl error is what surfaces; the message must be
+        the generic 'Scrape crashed' with no interpolated exception detail.
+        """
         monkeypatch.setattr(scraper_module.settings, "max_retries", 2)
         monkeypatch.setattr(scraper_module.settings, "retry_delay_seconds", 0)
-        monkeypatch.setattr(scraper_module.settings, "jina_enabled", True)
+        monkeypatch.setattr(scraper_module.settings, "jina_enabled", False)
 
         with (
             patch(
                 "scraper.scraper.crawl_url",
-                new=AsyncMock(side_effect=[RuntimeError("boom 1"), RuntimeError("boom 2")]),
-            ),
-            patch(
-                "scraper.scraper.jina_fetch",
-                new=AsyncMock(return_value=("Jina Reader failed: nope", True)),
+                new=AsyncMock(
+                    side_effect=[RuntimeError("boom 1 secret"), RuntimeError("boom 2 secret")]
+                ),
             ),
             patch("scraper.scraper.asyncio.sleep", new=AsyncMock()) as mock_sleep,
         ):
             result = await scrape("https://example.com")
 
         assert result.source == "none"
-        assert result.error == "Scrape crashed: boom 2"
-        assert result.attempts == ["crawl4ai attempt 1", "crawl4ai attempt 2", "jina fallback"]
+        assert result.error == "Scrape crashed"
+        assert result.error is not None
+        assert "boom" not in result.error and "secret" not in result.error
+        assert result.attempts == ["crawl4ai attempt 1", "crawl4ai attempt 2", "jina disabled"]
         mock_sleep.assert_awaited_once()
 
     @pytest.mark.asyncio

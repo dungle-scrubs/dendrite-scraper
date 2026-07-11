@@ -158,13 +158,42 @@ def require_api_key(
         if scheme.lower() == "bearer":
             presented = token
 
-    if presented is None or not secrets.compare_digest(presented, expected):
+    # `secrets.compare_digest` raises TypeError on non-ASCII str inputs. Fail
+    # closed (401) rather than letting that surface as a 500, but do it before
+    # the constant-time compare so the valid-charset path stays timing-safe.
+    if presented is None or not presented.isascii():
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+    if not secrets.compare_digest(presented, expected):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+# Hostnames that bind only to the local machine and are therefore safe to run
+# without an API key.
+_LOCAL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def check_bind_safety() -> None:
+    """Refuse to start on a non-local bind without an API key.
+
+    A non-local bind (anything outside `_LOCAL_HOSTS`, e.g. 0.0.0.0) exposes the
+    scrape endpoint - and its SSRF-adjacent surface - to the network. Requiring
+    a key in that configuration prevents an accidental open relay.
+
+    @throws RuntimeError: When bound non-locally with no `SCRAPER_API_KEY` set.
+    """
+    if settings.host not in _LOCAL_HOSTS and not settings.api_key:
+        raise RuntimeError(
+            f"Refusing to start: host {settings.host!r} is a non-local bind but no "
+            "SCRAPER_API_KEY is set. Set SCRAPER_API_KEY, or bind to a local host "
+            "(127.0.0.1, ::1, localhost)."
+        )
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Log startup configuration."""
+    """Validate the bind configuration and log startup."""
+    check_bind_safety()
     logger.info("scraper starting on %s:%d", settings.host, settings.port)
     yield
 

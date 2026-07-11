@@ -254,3 +254,128 @@ class TestApiKeyAuth:
             headers={"Authorization": "Bearer s3cret"},
         )
         assert resp.status_code == 200
+
+    def test_non_ascii_key_rejected_401_not_500(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A high-byte (non-ASCII) presented key must fail closed as 401.
+
+        `secrets.compare_digest` raises TypeError on non-ASCII str, which would
+        otherwise surface as a 500. Send a latin-1 high byte in the header value
+        and assert a clean 401 (F7 regression).
+        """
+        monkeypatch.setattr(settings, "api_key", "s3cret")
+        # 0xE9 = 'é' in latin-1; a valid header byte that decodes to non-ASCII
+        # str server-side. Passed as raw bytes since the HTTP client forbids
+        # non-ASCII str header values.
+        resp = client.post(
+            "/scrape",
+            json={"url": "https://example.com"},
+            headers={"X-API-Key": b"s\xe9cret"},
+        )
+        assert resp.status_code == 401
+
+
+class TestBindSafetyGuard:
+    """Tests for the startup guard against non-local binds without a key (F2)."""
+
+    def test_non_local_bind_without_key_refuses_to_start(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "host", "0.0.0.0")
+        monkeypatch.setattr(settings, "api_key", None)
+        with pytest.raises(RuntimeError, match="SCRAPER_API_KEY"), TestClient(server_module.app):
+            pass  # pragma: no cover - startup should raise before the body runs
+
+    def test_non_local_bind_with_key_starts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings, "host", "0.0.0.0")
+        monkeypatch.setattr(settings, "api_key", "s3cret")
+        with TestClient(server_module.app) as started:
+            assert started.get("/health").status_code == 200
+
+    def test_local_bind_without_key_starts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings, "host", "127.0.0.1")
+        monkeypatch.setattr(settings, "api_key", None)
+        with TestClient(server_module.app) as started:
+            assert started.get("/health").status_code == 200
+
+
+class TestMaxBodySizeMiddlewareAsgi:
+    """Direct ASGI-level tests for MaxBodySizeMiddleware streaming paths (F13)."""
+
+    @staticmethod
+    def _http_scope() -> dict[str, object]:
+        # No content-length header: forces the streaming accumulation path.
+        return {"type": "http", "method": "POST", "path": "/scrape", "headers": []}
+
+    def test_streaming_oversized_body_no_content_length_413(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Chunked body with no Content-Length exceeding the cap yields 413.
+
+        Drives the middleware with a custom receive emitting multiple
+        {more_body: True} chunks whose total exceeds the cap, and asserts the
+        413 short-circuit fires without ever delegating to the wrapped app.
+        """
+        monkeypatch.setattr(settings, "max_request_body_bytes", 100)
+
+        app_called = False
+
+        async def inner_app(_scope: dict, _receive: object, _send: object) -> None:
+            nonlocal app_called
+            app_called = True  # pragma: no cover - must not run for oversized body
+
+        middleware = server_module.MaxBodySizeMiddleware(inner_app)  # type: ignore[arg-type]
+
+        chunks: list[dict[str, object]] = [
+            {"type": "http.request", "body": b"x" * 60, "more_body": True},
+            {"type": "http.request", "body": b"y" * 60, "more_body": True},
+            {"type": "http.request", "body": b"z" * 60, "more_body": False},
+        ]
+        chunk_iter = iter(chunks)
+
+        async def receive() -> dict[str, object]:
+            return next(chunk_iter)
+
+        sent: list[dict[str, object]] = []
+
+        async def send(message: dict[str, object]) -> None:
+            sent.append(message)
+
+        asyncio.run(middleware(self._http_scope(), receive, send))
+
+        assert not app_called
+        start = next(m for m in sent if m["type"] == "http.response.start")
+        assert start["status"] == 413
+
+    def test_mid_body_disconnect_does_not_hang(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An http.disconnect mid-body must terminate the read loop cleanly.
+
+        The middleware should stop reading on disconnect (no hang) and delegate
+        the accumulated in-cap body to the wrapped app.
+        """
+        monkeypatch.setattr(settings, "max_request_body_bytes", 10_000)
+
+        app_called = False
+
+        async def inner_app(_scope: dict, _receive: object, _send: object) -> None:
+            nonlocal app_called
+            app_called = True
+
+        middleware = server_module.MaxBodySizeMiddleware(inner_app)  # type: ignore[arg-type]
+
+        messages: list[dict[str, object]] = [
+            {"type": "http.request", "body": b"partial", "more_body": True},
+            {"type": "http.disconnect"},
+        ]
+        msg_iter = iter(messages)
+
+        async def receive() -> dict[str, object]:
+            return next(msg_iter)
+
+        async def send(message: dict[str, object]) -> None:  # pragma: no cover - unused
+            pass
+
+        # Completes without hanging or raising StopIteration (loop breaks on disconnect).
+        asyncio.run(asyncio.wait_for(middleware(self._http_scope(), receive, send), timeout=5))
+        assert app_called

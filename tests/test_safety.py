@@ -64,8 +64,13 @@ class TestClassifyIp:
     @pytest.mark.parametrize(
         "ip",
         [
-            # Public IPv4 wrapped in the IPv4-mapped v6 encoding must still be ALLOWED.
+            # A public IPv4 wrapped in any embedded-v6 encoding must still be
+            # ALLOWED, on every CPython patch level - the embedded IPv4 is
+            # authoritative, not the wrapper's own is_reserved/is_global (which
+            # flags the mapped block reserved on 3.12.3 but not on 3.12.4+/3.13).
             "::ffff:93.184.216.34",  # mapped public
+            "::93.184.216.34",  # IPv4-compatible public
+            "64:ff9b::93.184.216.34",  # NAT64 public
         ],
     )
     def test_embedded_public_ipv4_allowed(self, ip: str) -> None:
