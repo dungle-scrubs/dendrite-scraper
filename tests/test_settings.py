@@ -35,6 +35,8 @@ class TestSecurityDefaults:
             ("max_retries", 0),
             # 0 makes wait_for cancel before the semaphore fast-path and 503s every request.
             ("scrape_acquire_timeout_seconds", 0),
+            # 0 would make every SSRF validation time out instantly and fail closed.
+            ("validate_timeout_seconds", 0),
             ("max_redirects", -1),
             ("crawl_timeout_seconds", -1),
             ("server_timeout_seconds", -1),

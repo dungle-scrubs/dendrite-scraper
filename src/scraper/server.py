@@ -89,9 +89,11 @@ class MaxBodySizeMiddleware:
         # abort if it exceeds the cap.
         body = bytearray()
         more_body = True
+        disconnected = False
         while more_body:
             message = await receive()
             if message.get("type") == "http.disconnect":
+                disconnected = True
                 break
             if message.get("type") != "http.request":
                 continue
@@ -102,6 +104,14 @@ class MaxBodySizeMiddleware:
                 await _emit_413(send)
                 return
             more_body = bool(message.get("more_body", False))
+
+        # Client hung up mid-upload: do NOT invoke the wrapped app. Re-injecting
+        # the partial bytes via a replay that only ever reports more_body=False
+        # would hand the app a well-framed but truncated request it can never see
+        # as disconnected. The client is already gone, so there is nothing to
+        # serve; return and let the server tear the connection down.
+        if disconnected:
+            return
 
         # Re-inject the accumulated body and delegate to the app normally.
         full_body = bytes(body)
@@ -281,9 +291,12 @@ async def scrape_endpoint(request: ScrapeRequest) -> ScrapeResponse:
         ) from exc
 
     try:
-        # Non-blocking validation (thread-offloaded) so DNS can't stall the loop.
+        # Non-blocking validation (offloaded to the bounded resolver pool) so DNS
+        # can't stall the loop. Deadline-bounded and fail-closed: a stalled
+        # resolver must not hold this concurrency slot for longer than the
+        # validation timeout (validate_url_async raises UrlRejected on expiry).
         try:
-            await validate_url_async(url)
+            await validate_url_async(url, timeout=settings.validate_timeout_seconds)
         except UrlRejected as exc:
             raise HTTPException(status_code=400, detail="URL rejected") from exc
 

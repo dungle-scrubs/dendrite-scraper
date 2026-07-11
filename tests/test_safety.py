@@ -175,3 +175,26 @@ class TestValidateUrlAsync:
     async def test_internal_rejected(self) -> None:
         with pytest.raises(UrlRejected):
             await validate_url_async("http://10.0.0.5/", resolver=_resolver("10.0.0.5"))
+
+    @pytest.mark.asyncio
+    async def test_slow_resolution_times_out_fails_closed(self) -> None:
+        """P1: a resolver that overruns the deadline is blocked, not allowed."""
+        import time
+
+        def slow_resolver(_host: str) -> list[str]:
+            time.sleep(0.3)  # overruns the 10ms deadline below
+            return ["93.184.216.34"]
+
+        with pytest.raises(UrlRejected) as exc:
+            await validate_url_async(
+                "https://slow.example.com", resolver=slow_resolver, timeout=0.01
+            )
+        assert exc.value.reason == "validation-timeout"
+
+    @pytest.mark.asyncio
+    async def test_fast_resolution_within_timeout_succeeds(self) -> None:
+        """P1: a timeout that isn't exceeded does not affect a normal validation."""
+        target = await validate_url_async(
+            "https://example.com/", resolver=_resolver("93.184.216.34"), timeout=5.0
+        )
+        assert isinstance(target, ValidatedTarget)

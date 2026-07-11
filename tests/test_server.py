@@ -349,10 +349,11 @@ class TestMaxBodySizeMiddlewareAsgi:
         assert start["status"] == 413
 
     def test_mid_body_disconnect_does_not_hang(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """An http.disconnect mid-body must terminate the read loop cleanly.
+        """An http.disconnect mid-body must terminate cleanly WITHOUT running the app.
 
-        The middleware should stop reading on disconnect (no hang) and delegate
-        the accumulated in-cap body to the wrapped app.
+        The middleware should stop reading on disconnect (no hang) and, because
+        the client is gone, return without delegating a truncated request to the
+        wrapped app (P2).
         """
         monkeypatch.setattr(settings, "max_request_body_bytes", 10_000)
 
@@ -360,7 +361,7 @@ class TestMaxBodySizeMiddlewareAsgi:
 
         async def inner_app(_scope: dict, _receive: object, _send: object) -> None:
             nonlocal app_called
-            app_called = True
+            app_called = True  # pragma: no cover - must not run after a disconnect
 
         middleware = server_module.MaxBodySizeMiddleware(inner_app)  # type: ignore[arg-type]
 
@@ -378,4 +379,4 @@ class TestMaxBodySizeMiddlewareAsgi:
 
         # Completes without hanging or raising StopIteration (loop breaks on disconnect).
         asyncio.run(asyncio.wait_for(middleware(self._http_scope(), receive, send), timeout=5))
-        assert app_called
+        assert not app_called
