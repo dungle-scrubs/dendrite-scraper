@@ -20,6 +20,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -326,14 +327,41 @@ def looks_like_bot_block(markdown: str) -> bool:
 # ── Crawl4AI ─────────────────────────────────────────────────
 
 
-async def _guard_route(route: Any) -> None:
+# The SSRF allow/block decision depends only on (scheme, host, port) — path,
+# query, and fragment never change it — so this tuple is a sound cache key for
+# deduplicating validation across the many sub-resource requests a single page
+# makes to the same origin.
+RouteHostKey = tuple[str, str, int | None]
+
+
+def _route_host_key(url: str) -> RouteHostKey | None:
+    """Derive the (scheme, host, port) cache key for a request URL.
+
+    @param url: The in-browser request URL.
+    @returns: The lowercased (scheme, host, port) key, or None if the URL cannot
+        be parsed (an out-of-range port raises), in which case the caller should
+        fall through to a full, uncached validation that fails closed.
+    """
+    try:
+        parts = urlsplit(url)
+        return (parts.scheme.lower(), (parts.hostname or "").lower(), parts.port)
+    except ValueError:
+        return None
+
+
+async def _guard_route(route: Any, cache: dict[RouteHostKey, bool] | None = None) -> None:
     """Playwright route handler: abort any in-browser request to a blocked host.
 
     Fires on every request the page makes, including redirect hops, so a public
     URL that 3xx-redirects toward an internal/metadata host is aborted rather
-    than followed. Uses `validate_url_async` (thread-offloaded) so the blocking
-    `getaddrinfo` can't stall the event loop — this handler runs once per
-    sub-resource request, so a sync call would freeze the loop on DNS-heavy pages.
+    than followed. Uses `validate_url_async` (offloaded to the bounded resolver
+    pool, with a fail-closed deadline) so the blocking `getaddrinfo` can't stall
+    the event loop and a hostile, DNS-heavy page can't fan unbounded resolution
+    onto the shared executor — this handler runs once per sub-resource request.
+
+    When `cache` is supplied the per-origin decision is memoized on the
+    `(scheme, host, port)` key, so a page pulling dozens of sub-resources from
+    one host resolves it once instead of once per request.
 
     Interception contract: this only sees requests that crawl4ai/Playwright route
     through `page.route("**/*", ...)`. HTTP 3xx responses followed at the fetch
@@ -343,12 +371,23 @@ async def _guard_route(route: Any) -> None:
     `set_hook` check in `crawl_url` guarantees the guard is actually attached.
 
     @param route: Playwright route for the intercepted request.
+    @param cache: Optional per-crawl (scheme, host, port) → allowed memo.
     """
+    key = _route_host_key(route.request.url)
+    if cache is not None and key is not None and key in cache:
+        await (route.continue_() if cache[key] else route.abort())
+        return
+
     try:
-        await validate_url_async(route.request.url)
+        await validate_url_async(route.request.url, timeout=settings.validate_timeout_seconds)
     except UrlRejected:
+        if cache is not None and key is not None:
+            cache[key] = False
         await route.abort()
         return
+
+    if cache is not None and key is not None:
+        cache[key] = True
     await route.continue_()
 
 
@@ -356,12 +395,14 @@ def _make_route_guard() -> Any:
     """Build a per-page route handler that host-validates and caps redirect hops.
 
     Each page context gets a fresh handler with its own navigation counter so a
-    redirect loop to public hosts can't spin forever (DoS), on top of the per-hop
-    host validation that closes SSRF.
+    redirect loop to public hosts can't spin forever (DoS), plus a fresh per-crawl
+    host-decision cache so repeated sub-resource requests to the same origin are
+    validated once, on top of the per-hop host validation that closes SSRF.
 
     @returns: An async Playwright route handler.
     """
     nav_count = 0
+    host_cache: dict[RouteHostKey, bool] = {}
 
     async def guard(route: Any) -> None:
         nonlocal nav_count
@@ -372,7 +413,7 @@ def _make_route_guard() -> Any:
             if nav_count > settings.max_redirects + 1:
                 await route.abort()
                 return
-        await _guard_route(route)
+        await _guard_route(route, host_cache)
 
     return guard
 

@@ -32,15 +32,35 @@ Design caveats (inherent to this architecture, not fully closeable here):
 from __future__ import annotations
 
 import asyncio
+import functools
 import ipaddress
 import socket
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
 # ── Constants ────────────────────────────────────────────────
 
 ALLOWED_SCHEMES = ("http", "https")
+
+# Dedicated, bounded executor for the blocking `getaddrinfo` in `validate_url`.
+# The in-browser route guard validates every sub-resource request, so a hostile
+# page referencing many dead/slow hosts would otherwise fan unbounded DNS onto
+# asyncio's shared default executor and starve unrelated `to_thread` work
+# service-wide. Isolating that work here caps concurrent resolutions and keeps
+# the default pool free. A module-level pool is created once and reused; its
+# threads are spawned lazily on first submit.
+#
+# Both the server pre-flight and the route guard draw from this one pool, so a
+# hostile page whose sub-resource hosts stall DNS can occupy all workers and
+# delay an unrelated request's pre-flight. That is a bounded, fail-closed
+# availability tradeoff (each call has its own `validate_timeout_seconds`
+# deadline), not an SSRF bypass — the deliberate consequence of bounding.
+_RESOLVER_MAX_WORKERS = 8
+_resolver_executor = ThreadPoolExecutor(
+    max_workers=_RESOLVER_MAX_WORKERS, thread_name_prefix="ssrf-resolve"
+)
 
 # Resolved-IP classification is the primary control: metadata.google.internal and
 # localhost resolve to link-local / loopback addresses and are blocked there. This
@@ -279,17 +299,37 @@ def validate_url(url: str, *, resolver: Resolver | None = None) -> ValidatedTarg
 # ── Async validation ─────────────────────────────────────────
 
 
-async def validate_url_async(url: str, *, resolver: Resolver | None = None) -> ValidatedTarget:
+async def validate_url_async(
+    url: str, *, resolver: Resolver | None = None, timeout: float | None = None
+) -> ValidatedTarget:
     """Validate a URL without blocking the event loop.
 
     `validate_url` resolves the host via the system resolver, which is a
     blocking `socket.getaddrinfo` call. In async call sites (the server handler,
     `crawl_url`, `jina_fetch`, the pipeline) that blocks the whole loop. This
-    wrapper offloads the same work to a worker thread via `asyncio.to_thread`.
+    wrapper offloads the same work to the bounded `_resolver_executor` so a burst
+    of validations (the route guard fires one per sub-resource) can neither stall
+    the loop nor exhaust the shared default executor.
+
+    When `timeout` is set, a resolution that does not complete within it fails
+    CLOSED (raises `UrlRejected`) rather than pinning the caller — e.g. a stalled
+    resolver must not hold a server concurrency slot or hang the route guard.
+    The worker thread may keep running to the OS resolver deadline, but the
+    bounded pool caps how many can pile up.
 
     @param url: Candidate URL.
     @param resolver: Host→addresses resolver (injectable for tests).
+    @param timeout: Per-validation deadline in seconds; None waits indefinitely.
     @returns: A ValidatedTarget with a sanitized URL and validated addresses.
-    @throws UrlRejected: When the URL violates the policy.
+    @throws UrlRejected: When the URL violates the policy or times out.
     """
-    return await asyncio.to_thread(validate_url, url, resolver=resolver)
+    loop = asyncio.get_running_loop()
+    future = loop.run_in_executor(
+        _resolver_executor, functools.partial(validate_url, url, resolver=resolver)
+    )
+    if timeout is None:
+        return await future
+    try:
+        return await asyncio.wait_for(future, timeout)
+    except TimeoutError as exc:
+        raise UrlRejected("validation-timeout", url=url) from exc

@@ -16,11 +16,13 @@ import httpx
 import pytest
 
 import scraper.scraper as scraper_module
+from scraper.safety import UrlRejected
 from scraper.scraper import (
     _cap_markdown,
     _guard_route,
     _install_route_guard,
     _is_non_retryable_crawl_error,
+    _make_route_guard,
     _suppressed_stdout,
     clean_markdown_content,
     crawl_url,
@@ -29,6 +31,7 @@ from scraper.scraper import (
     looks_like_bot_block,
     scrape,
 )
+from scraper.settings import settings
 
 
 class FakeCrawlResult:
@@ -1047,6 +1050,65 @@ class TestSsrfGuard:
         await _guard_route(route)
         assert route.continued is True
         assert route.aborted is False
+
+    @pytest.mark.asyncio
+    async def test_route_guard_passes_validation_timeout(self) -> None:
+        """P1: the guard validates with the fail-closed deadline, not unbounded."""
+        route = FakeRoute("https://example.com/page")
+        with patch("scraper.scraper.validate_url_async", new=AsyncMock()) as mock_validate:
+            await _guard_route(route)
+        mock_validate.assert_awaited_once_with(
+            "https://example.com/page", timeout=settings.validate_timeout_seconds
+        )
+
+    @pytest.mark.asyncio
+    async def test_route_guard_caches_allow_decision_per_origin(self) -> None:
+        """P1: repeated requests to one origin validate only once (DNS dedup)."""
+        cache: dict = {}
+        r1 = FakeRoute("https://example.com/a")
+        r2 = FakeRoute("https://example.com/b")  # same (scheme, host, port)
+        with patch("scraper.scraper.validate_url_async", new=AsyncMock()) as mock_validate:
+            await _guard_route(r1, cache)
+            await _guard_route(r2, cache)
+        assert mock_validate.await_count == 1
+        assert r1.continued and r2.continued
+
+    @pytest.mark.asyncio
+    async def test_route_guard_caches_block_decision_per_origin(self) -> None:
+        """P1: a blocked origin is memoized too, so it isn't re-resolved."""
+        cache: dict = {}
+        r1 = FakeRoute("http://blocked.example/a")
+        r2 = FakeRoute("http://blocked.example/b")
+        with patch(
+            "scraper.scraper.validate_url_async",
+            new=AsyncMock(side_effect=UrlRejected("blocked-address: private")),
+        ) as mock_validate:
+            await _guard_route(r1, cache)
+            await _guard_route(r2, cache)
+        assert mock_validate.await_count == 1
+        assert r1.aborted and r2.aborted
+
+    @pytest.mark.asyncio
+    async def test_route_guard_does_not_cache_across_distinct_origins(self) -> None:
+        """P1: different origins are validated independently, not conflated."""
+        cache: dict = {}
+        r1 = FakeRoute("https://a.example/x")
+        r2 = FakeRoute("https://b.example/x")
+        with patch("scraper.scraper.validate_url_async", new=AsyncMock()) as mock_validate:
+            await _guard_route(r1, cache)
+            await _guard_route(r2, cache)
+        assert mock_validate.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_make_route_guard_uses_a_fresh_per_crawl_cache(self) -> None:
+        """P1: each page gets its own cache; one page's memo can't leak to another."""
+        guard_a = _make_route_guard()
+        guard_b = _make_route_guard()
+        with patch("scraper.scraper.validate_url_async", new=AsyncMock()) as mock_validate:
+            await guard_a(FakeRoute("https://example.com/1"))
+            await guard_a(FakeRoute("https://example.com/2"))  # cached within guard_a
+            await guard_b(FakeRoute("https://example.com/3"))  # fresh cache -> re-validates
+        assert mock_validate.await_count == 2
 
     @pytest.mark.asyncio
     async def test_install_route_guard_attaches_handler(self) -> None:

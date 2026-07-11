@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     @param server_timeout_seconds: Global per-request deadline for POST /scrape.
     @param max_concurrent_scrapes: Maximum concurrent in-flight scrapes (bounds Chromium/memory).
     @param scrape_acquire_timeout_seconds: How long a request waits for a concurrency slot before 503.
+    @param validate_timeout_seconds: Per-URL SSRF-validation (DNS) deadline; on
+        expiry the URL fails closed (blocked) so a stalled resolver can't pin a
+        server slot or hang the in-browser route guard.
     @param crawl_timeout_seconds: Per-URL crawl4ai timeout.
     @param jina_timeout_seconds: Per-URL Jina Reader timeout.
     @param jina_max_bytes: Reject a Jina response whose declared length exceeds this.
@@ -35,6 +38,7 @@ class Settings(BaseSettings):
     server_timeout_seconds: float = Field(120.0, ge=0)
     max_concurrent_scrapes: int = Field(4, ge=1)
     scrape_acquire_timeout_seconds: float = Field(5.0, gt=0)
+    validate_timeout_seconds: float = Field(5.0, gt=0)
     crawl_timeout_seconds: float = Field(25.0, ge=0)
     jina_timeout_seconds: float = Field(30.0, ge=0)
     jina_max_bytes: int = Field(5_000_000, ge=1)
