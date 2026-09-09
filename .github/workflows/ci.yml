@@ -42,4 +42,9 @@ jobs:
         # resolved dependency graph and fails on known vulnerabilities.
         # `--strict` is dropped: the editable dungle-scrubs-scraper package isn't on
         # PyPI, which --strict makes fatal. pip-audit still fails on actual vulns.
-        run: uv run --with pip-audit pip-audit
+        # PYSEC-2026-3740 (nltk path traversal in model-artifact APIs, GHSA-8mgp-
+        # 746c-j5xp) is ignored: no fixed release exists (3.10.3 is last_affected),
+        # nltk is a transitive crawl4ai dependency, and this service never passes
+        # caller-controlled paths to nltk model-artifact APIs. Revisit on a nltk
+        # release newer than 3.10.3.
+        run: uv run --with pip-audit pip-audit --ignore-vuln PYSEC-2026-3740
