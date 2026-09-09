@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/dungle-scrubs/scraper/compare/v0.2.1...v0.2.2) (2026-09-09)
+
+
+### Maintenance
+
+* build and publish with uv, attest via attest-action ([#30](https://github.com/dungle-scrubs/scraper/issues/30)) ([4bc2aee](https://github.com/dungle-scrubs/scraper/commit/4bc2aeec638281e01021bdeefba4367075310ebc))
+
 ## [0.2.1](https://github.com/dungle-scrubs/scraper/compare/v0.2.0...v0.2.1) (2026-09-09)
 
 
