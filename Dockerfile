@@ -1,5 +1,5 @@
 # Pin to the declared floor (requires-python >=3.12), pinned by digest (multi-arch index).
-FROM python:3.12-slim-bookworm@sha256:8a7e7cc04fd3e2bd787f7f24e22d5d119aa590d429b50c95dfe12b3abe52f48b
+FROM python:3.14-slim-bookworm@sha256:9ab8d9c8514b44f90cf0029dd42fdd7e9e211e639c8b995304cc04568dee900f
 
 # Playwright system deps for crawl4ai's headless Chromium.
 RUN apt-get update && apt-get install -y --no-install-recommends \
