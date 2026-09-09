@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.2.1](https://github.com/dungle-scrubs/scraper/compare/v0.2.0...v0.2.1) (2026-09-09)
+
+
+### Added
+
+* initial public release ([a05187b](https://github.com/dungle-scrubs/scraper/commit/a05187b38858ef75b2ddaf22fcc54ae02cedc9a8))
+
+
+### Fixed
+
+* harden SSRF DNS fan-out (P1) and disconnect replay (P2) ([#16](https://github.com/dungle-scrubs/scraper/issues/16)) ([f559cb1](https://github.com/dungle-scrubs/scraper/commit/f559cb17cbb428d1c8796f15a8fce10db6593203))
+* resolve all verified audit findings ([#15](https://github.com/dungle-scrubs/scraper/issues/15)) ([41a3998](https://github.com/dungle-scrubs/scraper/commit/41a399815418325285e938970d61f0972f972bc4))
+
+
+### Documentation
+
+* add RFC-01 draft - scrape pipeline interface consolidation ([#27](https://github.com/dungle-scrubs/scraper/issues/27)) ([ebcc9b9](https://github.com/dungle-scrubs/scraper/commit/ebcc9b9b8e905cb2d2e677256ad16b59b744835a))
+
+
+### Maintenance
+
+* add brand assets - mark (svg, 512, 1024) and social preview ([#29](https://github.com/dungle-scrubs/scraper/issues/29)) ([4e21f82](https://github.com/dungle-scrubs/scraper/commit/4e21f821cd60a4ea1bc37a58ec0ad056eee0887c))
+* **deps:** bump actions/checkout from 4.3.1 to 7.0.1 ([#21](https://github.com/dungle-scrubs/scraper/issues/21)) ([873ccdd](https://github.com/dungle-scrubs/scraper/commit/873ccddb7cb36d4abb7636646c9b39efbdbf08df))
+* **deps:** bump actions/setup-python from 5.6.0 to 7.0.0 ([#22](https://github.com/dungle-scrubs/scraper/issues/22)) ([a22aa08](https://github.com/dungle-scrubs/scraper/commit/a22aa08621f5fc153243b79907b8356eb18152a3))
+* **deps:** bump astral-sh/setup-uv from 6.8.0 to 10.0.1 ([#24](https://github.com/dungle-scrubs/scraper/issues/24)) ([a78e4fb](https://github.com/dungle-scrubs/scraper/commit/a78e4fb71840bbd9562e4c0e91c42d0250451291))
+* **deps:** bump audited dependencies; ignore unfixed nltk advisory ([#26](https://github.com/dungle-scrubs/scraper/issues/26)) ([458596f](https://github.com/dungle-scrubs/scraper/commit/458596fd25bf41d633cbc08fdebd197c313a188c))
+* **deps:** bump googleapis/release-please-action from 4.4.1 to 5.0.0 ([#18](https://github.com/dungle-scrubs/scraper/issues/18)) ([04b5a77](https://github.com/dungle-scrubs/scraper/commit/04b5a77a4143274523538af1a6d7c17d5651ad9d))
+* **deps:** bump pypa/gh-action-pypi-publish from 1.14.0 to 1.14.2 ([#23](https://github.com/dungle-scrubs/scraper/issues/23)) ([d0bab90](https://github.com/dungle-scrubs/scraper/commit/d0bab90962e3409a6baa626410286557cb9a2b40))
+* **deps:** bump python from 3.12-slim-bookworm to 3.14-slim-bookworm ([#11](https://github.com/dungle-scrubs/scraper/issues/11)) ([d3699d7](https://github.com/dungle-scrubs/scraper/commit/d3699d7f85327d5a24f44221dba5789fab702f06))
+
 ## [0.2.0](https://github.com/dungle-scrubs/scraper/compare/v0.1.0...v0.2.0) (2026-03-06)
 
 
